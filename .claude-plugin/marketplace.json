@@ -1,0 +1,14 @@
+{
+  "name": "commit-msg",
+  "description": "/commit-msg drafts a commit message from the staged diff, then commits or amends",
+  "owner": {
+    "name": "Nhan Ngo"
+  },
+  "plugins": [
+    {
+      "name": "commit-msg",
+      "source": "./",
+      "description": "/commit-msg drafts a commit message from the staged diff, following the repo's format file or its recent history, then commits or amends (never pushes)"
+    }
+  ]
+}

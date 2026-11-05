@@ -1,0 +1,56 @@
+{
+  "name": "commit-msg",
+  "displayName": "Commit Message",
+  "version": "1.0.0",
+  "description": "/commit-msg drafts a commit message from the staged diff, following the repo's format file or its recent history, then commits or amends (never pushes)",
+  "author": {
+    "name": "Nhan Ngo"
+  },
+  "repository": "https://github.com/tnt1232007/claude-plugin-commit-msg",
+  "license": "MIT",
+  "keywords": [
+    "git",
+    "commit",
+    "commit-message",
+    "amend"
+  ],
+  "userConfig": {
+    "format_files": {
+      "type": "string",
+      "title": "Format files (default: .claude/commit-format.md, .github/commit-format.md)",
+      "description": "Comma-separated paths, relative to the repo root, to a file of commit message rules. The first one that exists is used; with none, the draft follows the style of the recent commits",
+      "default": ".claude/commit-format.md, .github/commit-format.md"
+    },
+    "model": {
+      "type": "string",
+      "title": "Model (default: sonnet)",
+      "description": "Model that drafts the message and merges it into HEAD's on an amend",
+      "options": [
+        "sonnet",
+        "haiku",
+        "opus"
+      ],
+      "default": "sonnet"
+    },
+    "exclude": {
+      "type": "string",
+      "title": "Excluded paths (default: .idea)",
+      "description": "Comma-separated git pathspecs left out of the diff the drafter reads and of the not-staged list (they are still committed when staged)",
+      "default": ".idea"
+    },
+    "history": {
+      "type": "number",
+      "title": "Recent messages (default: 10)",
+      "description": "How many recent commit messages the drafter reads for the house style",
+      "default": 10,
+      "min": 0
+    },
+    "max_file_chars": {
+      "type": "number",
+      "title": "Diff cap per file (default: 12000)",
+      "description": "Characters of each file's diff the drafter reads, so one generated file (a lockfile, an OpenAPI spec) cannot crowd out the rest",
+      "default": 12000,
+      "min": 1000
+    }
+  }
+}
