@@ -1,7 +1,7 @@
 {
   "name": "commit-msg",
   "displayName": "Commit Message",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "/commit-msg drafts a commit message from the staged diff, following the repo's format file or its recent history, then commits or amends (never pushes)",
   "author": {
     "name": "Nhan Ngo"

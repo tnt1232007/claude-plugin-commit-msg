@@ -23,7 +23,9 @@ Reply with exactly the merged message inside one fenced code block. No other tex
 const COMMIT = 'Commit'
 const AMEND = 'Amend'
 const LEAVE = 'Leave staged'
-const QUESTION = 'Commit the staged changes with this message?'
+const QUESTION = 'Commit the staged changes with the drafted message?'
+// Long enough for the command's output to be drawn before the dialog covers the screen.
+const ASK_DELAY_MS = 300
 
 const fenced = (text: string) => text.match(/```[^\n]*\n([\s\S]*?)\n```/)?.[1]?.trim()
 const list = (value: unknown) =>
@@ -31,6 +33,49 @@ const list = (value: unknown) =>
     .map(item => item.trim())
     .filter(Boolean)
 const count = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : fallback)
+
+type Decision = { top: string; model: string; rules: string; message: string; previous: string; hasHead: boolean; isPushed: boolean }
+
+// Asks Commit / Amend / Leave staged once the draft is on screen, then acts. Nothing here ever pushes.
+async function decide($: EngineInterface, d: Decision) {
+  const amendLabel = d.isPushed ? `${AMEND} (HEAD is pushed)` : AMEND
+  const labels = [COMMIT, ...(d.hasHead ? [amendLabel] : []), LEAVE]
+  // Dismissed, or no one to ask (a -p run): commit nothing.
+  const choice = await $.ui.ask(QUESTION, { header: 'Commit', options: labels }).catch(() => '')
+  if (choice !== COMMIT && choice !== amendLabel) {
+    $.ui.log('commit-msg: left staged, nothing committed.')
+    return
+  }
+
+  let final = d.message
+  const args = ['commit', '-F', '-']
+  if (choice === amendLabel) {
+    $.ui.status('commit-msg: merging into the previous message...')
+    const merged = await $.model.complete({
+      model: d.model,
+      system: MERGE_SYSTEM,
+      prompt: [d.rules, `<previous_message>\n${d.previous}\n</previous_message>`, `<new_message>\n${d.message}\n</new_message>`].filter(Boolean).join('\n\n'),
+      maxTokens: 2048,
+      timeoutMs: 120_000,
+    })
+    $.ui.status(undefined)
+    const mergedMessage = merged.isAnswered ? fenced(merged.text) : undefined
+    if (!mergedMessage) {
+      $.ui.log(`commit-msg: not amended, the model gave no merged message${merged.isAnswered ? '' : ` (${merged.reason})`}. Changes left staged.`)
+      return
+    }
+    final = mergedMessage
+    args.push('--amend')
+  }
+
+  const result = await $.process.run(['git', ...args], { cwd: d.top, stdin: `${final}\n` })
+  if (result.exitCode !== 0) {
+    $.ui.log(`commit-msg: git ${args.join(' ')} failed: ${(result.stderr || result.stdout).trim()}`)
+    return
+  }
+  const sha = (await $.process.run(['git', 'rev-parse', '--short', 'HEAD'], { cwd: d.top })).stdout.trim()
+  $.ui.log(args.includes('--amend') ? `commit-msg: amended ${sha} (draft merged into HEAD's message), not pushed.` : `commit-msg: committed ${sha}, not pushed.`)
+}
 
 async function isRepo($: EngineInterface) {
   const root = await $.session.root()
@@ -129,40 +174,14 @@ export const register: Register = (on, options) => {
     const message = fenced(reply.text)
     if (!message) return { text: draft }
 
-    // $.ui.ask has no option previews (a plugin's own AskUserQuestion tool call is refused), so the draft rides in the question. Nothing here ever pushes.
     const hasHead = (await run('rev-parse', '--verify', '-q', 'HEAD')).exitCode === 0
     const isPushed = hasHead && (await git('branch', '-r', '--contains', 'HEAD')).trim() !== ''
     const previous = hasHead ? (await git('log', '-1', '--format=%B')).trim() : ''
-    const amendLabel = isPushed ? `${AMEND} (HEAD is pushed)` : AMEND
-    const labels = [COMMIT, ...(hasHead ? [amendLabel] : []), LEAVE]
-    // Dismissed, or no one to ask (a -p run): commit nothing.
-    const choice = await $.ui.ask(`${QUESTION}\n\n${message}`, { header: 'Commit', options: labels }).catch(() => '')
 
-    let final = message
-    const args = ['commit', '-F', '-']
-    if (choice === amendLabel) {
-      $.ui.status('commit-msg: merging into the previous message...')
-      const merged = await $.model.complete({
-        model,
-        system: MERGE_SYSTEM,
-        prompt: [rules, `<previous_message>\n${previous}\n</previous_message>`, `<new_message>\n${message}\n</new_message>`].filter(Boolean).join('\n\n'),
-        maxTokens: 2048,
-        timeoutMs: 120_000,
-      })
-      $.ui.status(undefined)
-      const mergedMessage = merged.isAnswered ? fenced(merged.text) : undefined
-      if (!mergedMessage) return { text: `Not amended: the model gave no merged message${merged.isAnswered ? '' : ` (${merged.reason})`}. Changes left staged.` }
-      final = mergedMessage
-      args.push('--amend')
-    } else if (choice !== COMMIT) {
-      return { text: `${draft}\n\nLeft staged, nothing committed.` }
-    }
-
-    const result = await $.process.run(['git', ...args], { cwd: top, stdin: `${final}\n` })
-    if (result.exitCode !== 0) return { text: `git ${args.join(' ')} failed:\n${(result.stderr || result.stdout).trim()}` }
-    const sha = (await git('rev-parse', '--short', 'HEAD')).trim()
-    const verb = args.includes('--amend') ? 'Amended' : 'Committed'
-    return { text: `${verb} ${sha}, not pushed:\n\n\`\`\`\n${final}\n\`\`\`` }
+    // The dialog draws its question as one paragraph, so the draft is this command's own output (fence and line
+    // breaks kept) and the dialog opens just after it is drawn, asking only the short question.
+    $.clock.after(ASK_DELAY_MS, () => void decide($, { top, model, rules, message, previous, hasHead, isPushed }))
+    return { text: `${draft}\n\nAnswer the Commit dialog: ${hasHead ? 'Commit, Amend or Leave staged' : 'Commit or Leave staged'}.` }
   }).catch(($, e, next) => {
     $.ui.status(undefined)
     return next.called ? next(e) : { text: 'commit-msg: failed, see claude --debug for the reason.' }

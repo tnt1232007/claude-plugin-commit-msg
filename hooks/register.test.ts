@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 type On = Parameters<Parameters<typeof test>[1]>[1]
 type Repo = {
@@ -17,7 +17,7 @@ type Repo = {
 
 const ROOT = 'D:/repo/sub'
 const TOP = 'D:/repo'
-const QUESTION = 'Commit the staged changes with this message?'
+const QUESTION = 'Commit the staged changes with the drafted message?'
 const DRAFT = '```\nfeat(api): add the health endpoint\n```\nDropped the lockfile bump as noise.'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
@@ -27,6 +27,7 @@ function world(on: On, repo: Repo = {}) {
   const prompts: { system?: string; prompt: string; model: string }[] = []
   const registered: string[] = []
   const asked: string[] = []
+  const logs: string[] = []
   const replies = [...(repo.replies ?? [DRAFT])]
   const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
 
@@ -40,7 +41,10 @@ function world(on: On, repo: Repo = {}) {
   // What runs beneath the plugin: the skill, when the plugin passes the command on.
   on('command.run', () => ({ text: 'skill ran' }))
   on('ui.status', () => ({ value: undefined }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_, e) => {
+    logs.push(String((e as { text?: string }).text ?? ''))
+    return { value: undefined }
+  })
   on('fs.read', (_, e) => {
     // The engine hands the path over in the platform's own form (backslashes on Windows).
     const text = repo.files?.[e.path.replace(/\\/g, '/')]
@@ -51,7 +55,7 @@ function world(on: On, repo: Repo = {}) {
     prompts.push({ system: e.system, prompt: e.prompt, model: e.model })
     return { value: { isAnswered: true as const, text: replies.shift() ?? '', usage: USAGE } }
   })
-  // $.ui.ask raises AskUserQuestion here; the draft rides in the question text.
+  // $.ui.ask raises AskUserQuestion here.
   on('tool.call', (_, e) => {
     const question = String((e as { questions?: { question: string }[] }).questions?.[0]?.question ?? '')
     asked.push(question)
@@ -74,7 +78,7 @@ function world(on: On, repo: Repo = {}) {
     if (argv[1] === 'commit') return out('')
     return out('', 1)
   })
-  return { runs, prompts, registered, asked }
+  return { runs, prompts, registered, asked, logs }
 }
 
 const start = ($: Parameters<Parameters<typeof test>[1]>[0]) => $.session.start({ cwd: ROOT, surface: 'desktop', isInteractive: true })
@@ -122,10 +126,17 @@ test(
   'follows the first format file that exists, honours excludes and commits from the repo top',
   { options: { format_files: 'missing.md, docs/commit.md', exclude: '.idea, dist', model: 'haiku', history: 3 } },
   async ($, on) => {
-    const { runs, prompts, asked } = world(on, { files: { [`${TOP}/docs/commit.md`]: 'Use Conventional Commits.' }, choice: 'Commit' })
+    const clock = mock.clock(on, { now: 0 })
+    const { runs, prompts, asked, logs } = world(on, { files: { [`${TOP}/docs/commit.md`]: 'Use Conventional Commits.' }, choice: 'Commit' })
     await start($)
     const r = await $.command.run({ command: 'commit-msg', args: 'mention the endpoint' })
-    expect(asked[0]).toBe(`${QUESTION}\n\nfeat(api): add the health endpoint`)
+    // The draft is the command's own output; the dialog opens after it, with the short question alone.
+    expect(r.text).toContain('Draft from the staged diff, by docs/commit.md:\n\n```\nfeat(api): add the health endpoint\n```')
+    expect(r.text).toContain('Answer the Commit dialog: Commit, Amend or Leave staged.')
+    expect(asked).toEqual([])
+    expect(commits(runs).length).toBe(0)
+    await clock.advance(1000)
+    expect(asked).toEqual([QUESTION])
 
     expect(prompts[0]!.model).toBe('haiku')
     expect(prompts[0]!.prompt).toContain('<format_rules>\nUse Conventional Commits.\n</format_rules>')
@@ -139,34 +150,38 @@ test(
     expect(commit!.argv).toEqual(['git', 'commit', '-F', '-'])
     expect(commit!.cwd).toBe(TOP)
     expect(commit!.stdin).toBe('feat(api): add the health endpoint\n')
-    expect(r.text).toContain('Committed abc1234, not pushed')
+    expect(logs).toEqual(['commit-msg: committed abc1234, not pushed.'])
   },
 )
 
 test('without a format file it drafts from history, notes it, and leaves the changes staged', async ($, on) => {
-  const { runs, prompts } = world(on, { status: 'M  api/health.ts\nMM api/db.ts\n?? notes.txt\n' })
+  const clock = mock.clock(on, { now: 0 })
+  const { runs, prompts, logs } = world(on, { status: 'M  api/health.ts\nMM api/db.ts\n?? notes.txt\n' })
   await start($)
   const r = await $.command.run({ command: 'commit-msg' })
+  await clock.advance(1000)
 
   expect(prompts[0]!.prompt).not.toContain('<format_rules>')
   expect(prompts[0]!.prompt).toContain('<recent_messages>\nfix(api): handle timeouts')
   expect(r.text).toContain('no format file found (.claude/commit-format.md, .github/commit-format.md)')
   expect(r.text).toContain('Not staged (left out of the message):\n  MM api/db.ts\n  ?? notes.txt')
   expect(r.text).not.toContain('api/health.ts\n')
-  expect(r.text).toContain('Left staged, nothing committed.')
+  expect(logs).toEqual(['commit-msg: left staged, nothing committed.'])
   expect(commits(runs).length).toBe(0)
 })
 
 test('amend merges the draft into HEAD and warns when HEAD is pushed', async ($, on) => {
   const merged = '```\nfix(api): handle timeouts, add the health endpoint\n```'
-  const { runs, prompts } = world(on, { pushed: true, choice: 'Amend (HEAD is pushed)', replies: [DRAFT, merged] })
+  const clock = mock.clock(on, { now: 0 })
+  const { runs, prompts, logs } = world(on, { pushed: true, choice: 'Amend (HEAD is pushed)', replies: [DRAFT, merged] })
   await start($)
-  const r = await $.command.run({ command: 'commit-msg' })
+  await $.command.run({ command: 'commit-msg' })
+  await clock.advance(1000)
 
   expect(prompts.length).toBe(2)
   expect(prompts[1]!.prompt).toContain('<previous_message>\nfix(api): handle timeouts\n</previous_message>')
   const [commit] = commits(runs)
   expect(commit!.argv).toEqual(['git', 'commit', '-F', '-', '--amend'])
   expect(commit!.stdin).toBe('fix(api): handle timeouts, add the health endpoint\n')
-  expect(r.text).toContain('Amended abc1234, not pushed')
+  expect(logs).toEqual(["commit-msg: amended abc1234 (draft merged into HEAD's message), not pushed."])
 })

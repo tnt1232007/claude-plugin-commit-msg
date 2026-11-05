@@ -4,7 +4,7 @@ A Claude Code mod: `/commit-msg` drafts a commit message for the staged changes 
 
 - **Drafted outside the conversation.** The staged diff, the stat and the recent messages go to a separate model call, so no raw diff lands in your chat.
 - **Your repo's rules, or its history.** The first format file found (see Settings) is followed exactly. Without one, the draft copies the style of the recent commits: Conventional Commits, `[AREA]` tags, subject length, body.
-- **Commit, Amend or Leave staged.** The dialog shows the draft. Amend merges the draft into HEAD's message and is labelled `Amend (HEAD is pushed)` when HEAD is already on a remote branch. Leave staged prints the draft and commits nothing.
+- **Commit, Amend or Leave staged.** The draft prints as the command's output, then a short dialog asks what to do with it. Amend merges the draft into HEAD's message and is labelled `Amend (HEAD is pushed)` when HEAD is already on a remote branch. Leave staged prints the draft and commits nothing.
 - **What it left out.** Partly staged, unstaged and untracked files are listed under the draft, along with any file diff cut for size.
 
 `/commit-msg <hint>` steers emphasis and wording (`/commit-msg call out the breaking change`). The command shows up only in a git work tree, and it runs git from the repo's top level.
