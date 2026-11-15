@@ -21,6 +21,10 @@ const QUESTION = 'Commit the staged changes with the drafted message?'
 const DRAFT = '```\nfeat(api): add the health endpoint\n```\nDropped the lockfile bump as noise.'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
+// `git log --decorate-refs=refs/tags --format=%x1e%D%x1f%B` output, newest first: a commit's refs are its tag
+// decorations ('tag: v1.2.0'), empty when it has none.
+const log = (...commits: { message: string; refs?: string }[]) => commits.map(c => `\x1e${c.refs ?? ''}\x1f${c.message}\n`).join('')
+
 // A git repo, a model and the commit dialog in memory; every call is recorded.
 function world(on: On, repo: Repo = {}) {
   const runs: { argv: string[]; cwd?: string; stdin?: string }[] = []
@@ -69,8 +73,8 @@ function world(on: On, repo: Repo = {}) {
     if (args === 'rev-parse --show-toplevel') return out(`${TOP}\n`)
     if (args.startsWith('diff --cached --stat')) return out(repo.stat ?? ' api/health.ts | 12 ++++\n')
     if (args.startsWith('diff --cached')) return out('diff --git a/api/health.ts b/api/health.ts\n+export const health = () => "ok"\n')
-    if (args.startsWith('log -1')) return out(`${repo.previous ?? 'fix(api): handle timeouts'}\n`)
-    if (args.startsWith('log -')) return out(repo.log ?? 'fix(api): handle timeouts\n---\n')
+    if (args === 'log -1 --format=%B') return out(`${repo.previous ?? 'fix(api): handle timeouts'}\n`)
+    if (args.startsWith('log -')) return out(repo.log ?? log({ message: 'fix(api): handle timeouts' }))
     if (args.startsWith('status --short')) return out(repo.status ?? 'M  api/health.ts\n')
     if (args === 'rev-parse --verify -q HEAD') return out('abc\n')
     if (args === 'branch -r --contains HEAD') return out(repo.pushed ? '  origin/main\n' : '')
@@ -144,7 +148,7 @@ test(
     const diff = runs.find(run => run.argv.slice(1, 3).join(' ') === 'diff --cached')!
     expect(diff.argv).toContain(':(exclude).idea')
     expect(diff.argv).toContain(':(exclude)dist')
-    expect(runs.some(run => run.argv.join(' ') === 'git log -3 --format=%B---')).toBe(true)
+    expect(runs.some(run => run.argv.join(' ') === 'git log -9 --decorate-refs=refs/tags --format=%x1e%D%x1f%B')).toBe(true)
 
     const [commit] = commits(runs)
     expect(commit!.argv).toEqual(['git', 'commit', '-F', '-'])
@@ -162,12 +166,44 @@ test('without a format file it drafts from history, notes it, and leaves the cha
   await clock.advance(1000)
 
   expect(prompts[0]!.prompt).not.toContain('<format_rules>')
-  expect(prompts[0]!.prompt).toContain('<recent_messages>\nfix(api): handle timeouts')
+  expect(prompts[0]!.prompt).toContain('<recent_messages>\n<message>\nfix(api): handle timeouts\n</message>\n</recent_messages>')
   expect(r.text).toContain('no format file found (.claude/commit-format.md, .github/commit-format.md)')
   expect(r.text).toContain('Not staged (left out of the message):\n  MM api/db.ts\n  ?? notes.txt')
   expect(r.text).not.toContain('api/health.ts\n')
   expect(logs).toEqual(['commit-msg: left staged, nothing committed.'])
   expect(commits(runs).length).toBe(0)
+})
+
+test('release commits (tagged) are left out of the recent messages', { options: { history: 2 } }, async ($, on) => {
+  const { prompts } = world(on, {
+    log: log(
+      { message: 'App 2.3.3', refs: 'tag: app-v2.3.3' },
+      { message: 'feat(api): add paging' },
+      { message: 'App 2.3.2', refs: 'HEAD -> main, tag: app-v2.3.2' },
+      { message: 'fix(db): close idle connections\n\nThe pool kept them past the timeout.' },
+      { message: 'App 2.3.1', refs: 'tag: app-v2.3.1' },
+      { message: 'docs: describe the settings' },
+    ),
+  })
+  await start($)
+  await $.command.run({ command: 'commit-msg' })
+
+  const prompt = prompts[0]!.prompt
+  expect(prompt).toContain(
+    '<recent_messages>\n<message>\nfeat(api): add paging\n</message>\n<message>\nfix(db): close idle connections\n\nThe pool kept them past the timeout.\n</message>\n</recent_messages>',
+  )
+  expect(prompt).not.toContain('App 2.3')
+  expect(prompt).not.toContain('docs: describe the settings')
+  expect(prompt).not.toContain('---')
+})
+
+test('when every recent commit is tagged, they are kept', async ($, on) => {
+  const { prompts } = world(on, {
+    log: log({ message: 'App 2.3.3', refs: 'tag: app-v2.3.3' }, { message: 'App 2.3.2', refs: 'tag: app-v2.3.2' }),
+  })
+  await start($)
+  await $.command.run({ command: 'commit-msg' })
+  expect(prompts[0]!.prompt).toContain('<recent_messages>\n<message>\nApp 2.3.3\n</message>\n<message>\nApp 2.3.2\n</message>\n</recent_messages>')
 })
 
 test('amend merges the draft into HEAD and warns when HEAD is pushed', async ($, on) => {

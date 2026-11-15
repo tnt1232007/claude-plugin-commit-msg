@@ -13,7 +13,7 @@ A project skill or command also named `commit-msg` (one kept for another agent, 
 
 ## Settings
 
-Set at install, or in `/config` from a terminal session:
+Set at install, or in `/config` from a terminal session. Tagged commits (releases) are left out of the history the drafter reads, and the draft never takes a version or a line from it, only its style.
 
 | Setting | Default | What it does |
 | --- | --- | --- |

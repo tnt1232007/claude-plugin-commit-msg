@@ -7,6 +7,7 @@ const COMMAND = 'commit-msg'
 const SYSTEM = `You write one git commit message for the staged changes of a repository.
 - When the user message gives format rules, follow them exactly.
 - Without them, match the style of the recent messages: their subject prefix scheme (Conventional Commits, [AREA] tags, none), subject length, whether there is a body, and its wrapping.
+- The recent messages show the style only. Never copy their content into the draft: no version numbers, release titles or lines that do not describe the staged diff.
 - Write imperative summaries that name the actual entity, setting or behavior. Never "update files", "misc changes" or a list of file names.
 - A change that is only noise (formatting, generated output, a lockfile or submodule pointer bump) gets no mention of its own unless the rules say otherwise.
 - A <hint> from the user steers emphasis and wording; it does not override the rules.
@@ -33,6 +34,29 @@ const list = (value: unknown) =>
     .map(item => item.trim())
     .filter(Boolean)
 const count = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : fallback)
+
+// One record per commit: RS, its tag decorations, US, its message. Control characters, so no message can fake a
+// boundary and the model never sees a separator it could copy.
+const LOG_FORMAT = '--format=%x1e%D%x1f%B'
+const TAGGED = /(^|, )tag: /
+
+// The newest `history` messages, each in <message>. A tagged commit is a release (a version bump), whose subject the
+// drafter would otherwise copy above the real one; tagged commits are dropped unless every one is tagged.
+function recentMessages(log: string, history: number) {
+  const records = log
+    .split('\x1e')
+    .slice(1)
+    .map(record => {
+      const at = record.indexOf('\x1f')
+      return { refs: record.slice(0, at), message: record.slice(at + 1).trim() }
+    })
+    .filter(record => record.message)
+  const untagged = records.filter(record => !TAGGED.test(record.refs))
+  return (untagged.length ? untagged : records)
+    .slice(0, history)
+    .map(record => `<message>\n${record.message}\n</message>`)
+    .join('\n')
+}
 
 type Decision = { top: string; model: string; rules: string; message: string; previous: string; hasHead: boolean; isPushed: boolean }
 
@@ -129,7 +153,8 @@ export const register: Register = (on, options) => {
 
     const [diff, log, status] = await Promise.all([
       git('diff', '--cached', ...scope),
-      history > 0 ? git('log', `-${history}`, '--format=%B---') : Promise.resolve(''),
+      // Three times as many as needed, so enough remain once the release commits are dropped.
+      history > 0 ? git('log', `-${history * 3}`, '--decorate-refs=refs/tags', LOG_FORMAT) : Promise.resolve(''),
       git('status', '--short', ...scope),
     ])
 
@@ -140,9 +165,10 @@ export const register: Register = (on, options) => {
       .join('')
 
     const rules = format ? `<format_rules>\n${format}\n</format_rules>` : ''
+    const recent = recentMessages(log, history)
     const prompt = [
       rules,
-      log.trim() ? `<recent_messages>\n${log}\n</recent_messages>` : '',
+      recent ? `<recent_messages>\n${recent}\n</recent_messages>` : '',
       `<stat>\n${stat}\n</stat>`,
       `<diff>\n${capped}\n</diff>`,
       hint ? `<hint>\n${hint}\n</hint>` : '',
