@@ -25,6 +25,8 @@ const COMMIT = 'Commit'
 const AMEND = 'Amend'
 const LEAVE = 'Leave staged'
 const QUESTION = 'Commit the staged changes with the drafted message?'
+const STAGE_ALL = 'Stage all'
+const CANCEL = 'Cancel'
 // Long enough for the command's output to be drawn before the dialog covers the screen.
 const ASK_DELAY_MS = 300
 
@@ -138,8 +140,34 @@ export const register: Register = (on, options) => {
     const run = (...args: string[]) => $.process.run(['git', ...args], { cwd: top })
     const git = async (...args: string[]) => (await run(...args)).stdout
 
-    const stat = await git('diff', '--cached', '--stat', ...scope)
-    if (stat.trim() === '') return { text: 'Nothing staged.' }
+    let stat = await git('diff', '--cached', '--stat', ...scope)
+    let stagedNote = ''
+    if (stat.trim() === '') {
+      const changed = (await git('status', '--short', ...scope)).split('\n').filter(line => line.length > 3)
+      if (!changed.length) return { text: 'Nothing staged, and no changes to stage.' }
+      // Stage all = tracked changes plus untracked files. An untracked folder that is its own repository (a
+      // worktree, a clone) is listed with a trailing slash; `git add` would record it as a gitlink, so it is left out.
+      const untracked = (await git('ls-files', '--others', '--exclude-standard', '-z', ...scope)).split('\0').filter(Boolean)
+      const files = untracked.filter(path => !path.endsWith('/'))
+      const repos = untracked.filter(path => path.endsWith('/'))
+      // `status` folds an untracked folder into one line, so count tracked lines plus untracked files.
+      const toStage = changed.filter(line => !line.startsWith('??')).length + files.length
+      if (toStage <= 0) return { text: `Nothing staged; only nested repositories are untracked (${repos.join(', ')}).` }
+      const noun = toStage === 1 ? 'change' : 'changes'
+      const choice = await $.ui
+        .ask(`Nothing is staged. Stage all ${toStage} ${noun}?`, { header: 'Stage', options: [STAGE_ALL, CANCEL] })
+        .catch(() => '')
+      if (choice !== STAGE_ALL) return { text: 'Nothing staged.' }
+      const tracked = await run('add', '-u', ...scope)
+      const added = files.length ? await run('add', '--', ...files) : tracked
+      if (tracked.exitCode !== 0 || added.exitCode !== 0) {
+        const failed = tracked.exitCode !== 0 ? tracked : added
+        return { text: `commit-msg: git add failed: ${(failed.stderr || failed.stdout).trim()}` }
+      }
+      stat = await git('diff', '--cached', '--stat', ...scope)
+      if (stat.trim() === '') return { text: 'Nothing staged.' }
+      stagedNote = `Staged all changes${repos.length ? `, leaving out the nested repositories ${repos.join(', ')}` : ''}.`
+    }
 
     let format = ''
     let formatFile = ''
@@ -189,6 +217,7 @@ export const register: Register = (on, options) => {
       .map(line => `  ${line}`)
 
     const notes = [
+      stagedNote,
       formatFiles.length && !format ? `Note: no format file found (${formatFiles.join(', ')}), drafted from the recent commits' style.` : '',
       cutCount ? `Note: ${cutCount} file diff(s) cut at ${maxFileChars} characters each.` : '',
       leftOut.length ? `Not staged (left out of the message):\n${leftOut.join('\n')}` : '',

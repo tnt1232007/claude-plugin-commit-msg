@@ -6,6 +6,10 @@ type Repo = {
   // Another command already listed under the same name (a project skill).
   skill?: boolean
   stat?: string
+  // The staged stat once `git add` has run (Stage all).
+  stagedStat?: string
+  // `git ls-files --others -z` output: untracked files, a nested repository with a trailing slash.
+  untracked?: string
   log?: string
   status?: string
   pushed?: boolean
@@ -71,7 +75,10 @@ function world(on: On, repo: Repo = {}) {
     const args = argv.slice(1).join(' ')
     if (args === 'rev-parse --is-inside-work-tree') return repo.isRepo === false ? out('', 128) : out('true\n')
     if (args === 'rev-parse --show-toplevel') return out(`${TOP}\n`)
-    if (args.startsWith('diff --cached --stat')) return out(repo.stat ?? ' api/health.ts | 12 ++++\n')
+    const isAdded = runs.some(run => run.argv[1] === 'add')
+    if (args.startsWith('diff --cached --stat')) return out((isAdded ? repo.stagedStat : repo.stat) ?? ' api/health.ts | 12 ++++\n')
+    if (args.startsWith('ls-files --others')) return out(repo.untracked ?? '')
+    if (argv[1] === 'add') return out('')
     if (args.startsWith('diff --cached')) return out('diff --git a/api/health.ts b/api/health.ts\n+export const health = () => "ok"\n')
     if (args === 'log -1 --format=%B') return out(`${repo.previous ?? 'fix(api): handle timeouts'}\n`)
     if (args.startsWith('log -')) return out(repo.log ?? log({ message: 'fix(api): handle timeouts' }))
@@ -117,13 +124,42 @@ test('outside a git repo /commit-msg falls through to the skill', async ($, on) 
   expect(prompts.length).toBe(0)
 })
 
-test('nothing staged commits nothing', async ($, on) => {
-  const { runs, prompts } = world(on, { stat: '' })
+test('nothing staged asks to stage all, and Cancel commits nothing', async ($, on) => {
+  const { runs, prompts, asked } = world(on, { stat: '', status: ' M api/health.ts\n?? notes.txt\n', untracked: 'notes.txt\0', choice: 'Cancel' })
   await start($)
   const r = await $.command.run({ command: 'commit-msg' })
+  expect(asked).toEqual(['Nothing is staged. Stage all 2 changes?'])
   expect(r.text).toBe('Nothing staged.')
+  expect(runs.some(run => run.argv[1] === 'add')).toBe(false)
   expect(prompts.length).toBe(0)
   expect(commits(runs).length).toBe(0)
+})
+
+test('nothing staged and nothing changed does not ask', async ($, on) => {
+  const { prompts, asked } = world(on, { stat: '', status: '' })
+  await start($)
+  const r = await $.command.run({ command: 'commit-msg' })
+  expect(asked).toEqual([])
+  expect(r.text).toBe('Nothing staged, and no changes to stage.')
+  expect(prompts.length).toBe(0)
+})
+
+test('Stage all stages tracked changes and untracked files, but not a nested repository, then drafts', async ($, on) => {
+  const { runs, prompts, asked } = world(on, {
+    stat: '',
+    stagedStat: ' api/health.ts | 12 ++++\n',
+    status: ' M api/health.ts\n?? .claude/\n',
+    untracked: 'notes.txt\0.claude/worktrees/app/\0',
+    choice: 'Stage all',
+  })
+  await start($)
+  const r = await $.command.run({ command: 'commit-msg' })
+  expect(asked[0]).toBe('Nothing is staged. Stage all 2 changes?')
+  const adds = runs.filter(run => run.argv[1] === 'add').map(run => run.argv.slice(1).join(' '))
+  expect(adds).toEqual(['add -u -- . :(exclude).idea', 'add -- notes.txt'])
+  expect(prompts.length).toBe(1)
+  expect(r.text).toContain('Staged all changes, leaving out the nested repositories .claude/worktrees/app/.')
+  expect(r.text).toContain('Answer the Commit dialog')
 })
 
 test(
