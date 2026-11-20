@@ -27,8 +27,6 @@ const LEAVE = 'Leave staged'
 const QUESTION = 'Commit the staged changes with the drafted message?'
 const STAGE_ALL = 'Stage all'
 const CANCEL = 'Cancel'
-// Long enough for the logged draft to be drawn before the dialog covers the screen.
-const ASK_DELAY_MS = 300
 
 const fenced = (text: string) => text.match(/```[^\n]*\n([\s\S]*?)\n```/)?.[1]?.trim()
 const list = (value: unknown) =>
@@ -62,13 +60,36 @@ function recentMessages(log: string, history: number) {
 
 type Decision = { top: string; model: string; rules: string; message: string; previous: string; hasHead: boolean; isPushed: boolean }
 
+// The draft the open Commit dialog shows as the preview of Commit and Amend. A logged line ($.ui.log) is one dim
+// notice row and the dialog's question one paragraph, so either flattens the draft; an option preview keeps its lines.
+// $.ui.ask takes labels only, so the plugin's own tool.call hook adds the previews on the way to the dialog.
+let preview: { message: string; labels: string[] } | undefined
+
+type Option = { label: string; description?: string; preview?: string }
+type Question = { question: string; header?: string; options?: (Option | string)[]; multiSelect?: boolean }
+
+function withPreview(questions: Question[], shown: { message: string; labels: string[] }) {
+  return questions.map(q => {
+    if (q.question !== QUESTION || !q.options) return q
+    const options = q.options.map(option => {
+      const o: Option = typeof option === 'string' ? { label: option } : option
+      return shown.labels.includes(o.label) ? { ...o, description: o.description ?? '', preview: shown.message } : o
+    })
+    return { ...q, options }
+  })
+}
+
 // Asks Commit / Amend / Leave staged once the draft is on screen, then acts and resolves the outcome line. Nothing here
 // ever pushes.
 async function decide($: EngineInterface, d: Decision): Promise<string> {
   const amendLabel = d.isPushed ? `${AMEND} (HEAD is pushed)` : AMEND
   const labels = [COMMIT, ...(d.hasHead ? [amendLabel] : []), LEAVE]
   // Dismissed, or no one to ask (a -p run): commit nothing.
-  const choice = await $.ui.ask(QUESTION, { header: 'Commit', options: labels }).catch(() => '')
+  preview = { message: d.message, labels: [COMMIT, amendLabel] }
+  const choice = await $.ui
+    .ask(QUESTION, { header: 'Commit', options: labels })
+    .catch(() => '')
+    .finally(() => (preview = undefined))
   if (choice !== COMMIT && choice !== amendLabel) return 'commit-msg: left staged, nothing committed.'
 
   let final = d.message
@@ -121,6 +142,11 @@ export const register: Register = (on, options) => {
       argumentHint: '[hint for the drafter]',
     })
     return next(e)
+  })
+
+  on('tool.call', { tool: 'AskUserQuestion' }, ($, e, next) => {
+    const questions = (e as { questions?: Question[] }).questions
+    return preview && Array.isArray(questions) ? next({ ...e, questions: withPreview(questions, preview) } as typeof e) : next(e)
   })
 
   on('command.run', { command: COMMAND }, async ($, e, next) => {
@@ -225,12 +251,11 @@ export const register: Register = (on, options) => {
     const isPushed = hasHead && (await git('branch', '-r', '--contains', 'HEAD')).trim() !== ''
     const previous = hasHead ? (await git('log', '-1', '--format=%B')).trim() : ''
 
-    // The dialog draws its question as one paragraph, so the draft is logged first (fence and line breaks kept) and
-    // the dialog asks only the short question. It runs inside this dispatch: a dialog opened from a timer after the
-    // command has ended queues its notices after the turn, and an SSH session never takes them off the queue.
-    $.ui.log(draft)
-    await $.clock.sleep(ASK_DELAY_MS, { signal: next.signal })
-    return { text: await decide($, { top, model, rules, message, previous, hasHead, isPushed }) }
+    // The dialog shows the draft as its options' preview and runs inside this dispatch: a dialog opened from a timer
+    // after the command has ended queues its notices after the turn, and an SSH session never takes them off the
+    // queue. The output row is markdown, so the draft keeps its fence and line breaks there, above the outcome.
+    const outcome = await decide($, { top, model, rules, message, previous, hasHead, isPushed })
+    return { text: `${draft}\n\n${outcome}` }
   }).catch(($, e, next) => {
     $.ui.status(undefined)
     return next.called ? next(e) : { text: 'commit-msg: failed, see claude --debug for the reason.' }

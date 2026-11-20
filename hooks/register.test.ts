@@ -38,6 +38,8 @@ function world(on: On, repo: Repo = {}) {
   const registered: string[] = []
   const asked: string[] = []
   const logs: string[] = []
+  // Each dialog's option previews, by label.
+  const previews: Record<string, string | undefined>[] = []
   // What the person sees, in order: a logged line, a dialog, a commit.
   const order: string[] = []
   const replies = [...(repo.replies ?? [DRAFT])]
@@ -70,8 +72,10 @@ function world(on: On, repo: Repo = {}) {
   })
   // $.ui.ask raises AskUserQuestion here.
   on('tool.call', (_, e) => {
-    const question = String((e as { questions?: { question: string }[] }).questions?.[0]?.question ?? '')
+    const first = (e as { questions?: { question: string; options?: (string | { label: string; preview?: string })[] }[] }).questions?.[0]
+    const question = String(first?.question ?? '')
     asked.push(question)
+    previews.push(Object.fromEntries((first?.options ?? []).map(o => (typeof o === 'string' ? [o, undefined] : [o.label, o.preview]))))
     order.push('ask')
     if (repo.dismiss) throw new Error('dismissed')
     return { result: { answers: { [question]: repo.choice ?? 'Leave staged' } } } as never
@@ -99,7 +103,7 @@ function world(on: On, repo: Repo = {}) {
     }
     return out('', 1)
   })
-  return { runs, prompts, registered, asked, logs, order }
+  return { runs, prompts, registered, asked, logs, previews, order }
 }
 
 const start = ($: Parameters<Parameters<typeof test>[1]>[0]) => $.session.start({ cwd: ROOT, surface: 'desktop', isInteractive: true })
@@ -156,7 +160,7 @@ test('nothing staged and nothing changed does not ask', async ($, on) => {
 
 test('Stage all stages tracked changes and untracked files, but not a nested repository, then drafts', async ($, on) => {
   const clock = mock.clock(on, { now: 0 })
-  const { runs, prompts, asked, logs } = world(on, {
+  const { runs, prompts, asked, previews } = world(on, {
     stat: '',
     stagedStat: ' api/health.ts | 12 ++++\n',
     status: ' M api/health.ts\n?? .claude/\n',
@@ -166,12 +170,14 @@ test('Stage all stages tracked changes and untracked files, but not a nested rep
   await start($)
   const pending = $.command.run({ command: 'commit-msg' })
   await clock.advance(1000)
-  await pending
+  const r = await pending
   expect(asked).toEqual(['Nothing is staged. Stage all 2 changes?', QUESTION])
+  // The Stage dialog carries no preview.
+  expect(previews[0]).toEqual({ 'Stage all': undefined, Cancel: undefined })
   const adds = runs.filter(run => run.argv[1] === 'add').map(run => run.argv.slice(1).join(' '))
   expect(adds).toEqual(['add -u -- . :(exclude).idea', 'add -- notes.txt'])
   expect(prompts.length).toBe(1)
-  expect(logs[0]).toContain('Staged all changes, leaving out the nested repositories .claude/worktrees/app/.')
+  expect(r.text).toContain('Staged all changes, leaving out the nested repositories .claude/worktrees/app/.')
 })
 
 test(
@@ -179,17 +185,20 @@ test(
   { options: { format_files: 'missing.md, docs/commit.md', exclude: '.idea, dist', model: 'haiku', history: 3 } },
   async ($, on) => {
     const clock = mock.clock(on, { now: 0 })
-    const { runs, prompts, asked, logs, order } = world(on, { files: { [`${TOP}/docs/commit.md`]: 'Use Conventional Commits.' }, choice: 'Commit' })
+    const { runs, prompts, asked, logs, previews, order } = world(on, { files: { [`${TOP}/docs/commit.md`]: 'Use Conventional Commits.' }, choice: 'Commit' })
     await start($)
     const pending = $.command.run({ command: 'commit-msg', args: 'mention the endpoint' })
     await clock.advance(1000)
     const r = await pending
-    // The draft is logged first, then the dialog asks the short question alone, then the commit runs, all inside the
-    // command's own dispatch; the command answers with the outcome.
-    expect(order).toEqual(['log', 'ask', 'commit'])
-    expect(logs[0]).toContain('Draft from the staged diff, by docs/commit.md:\n\n```\nfeat(api): add the health endpoint\n```')
+    // The dialog shows the draft as the preview of Commit and Amend, then the commit runs, all inside the command's
+    // own dispatch. Nothing is logged: a logged row flattens the draft to one line.
+    expect(order).toEqual(['ask', 'commit'])
     expect(asked).toEqual([QUESTION])
-    expect(r.text).toBe('commit-msg: committed abc1234, not pushed.')
+    expect(previews[0]).toEqual({ Commit: 'feat(api): add the health endpoint', Amend: 'feat(api): add the health endpoint', 'Leave staged': undefined })
+    // The output row is markdown: the draft with its fence and line breaks, then the outcome.
+    expect(r.text).toBe(
+      'Draft from the staged diff, by docs/commit.md:\n\n```\nfeat(api): add the health endpoint\n```\nDropped the lockfile bump as noise.\n\ncommit-msg: committed abc1234, not pushed.',
+    )
 
     expect(prompts[0]!.model).toBe('haiku')
     expect(prompts[0]!.prompt).toContain('<format_rules>\nUse Conventional Commits.\n</format_rules>')
@@ -203,13 +212,13 @@ test(
     expect(commit!.argv).toEqual(['git', 'commit', '-F', '-'])
     expect(commit!.cwd).toBe(TOP)
     expect(commit!.stdin).toBe('feat(api): add the health endpoint\n')
-    expect(logs.length).toBe(1)
+    expect(logs).toEqual([])
   },
 )
 
 test('without a format file it drafts from history, notes it, and leaves the changes staged', async ($, on) => {
   const clock = mock.clock(on, { now: 0 })
-  const { runs, prompts, logs, asked } = world(on, { status: 'M  api/health.ts\nMM api/db.ts\n?? notes.txt\n' })
+  const { runs, prompts, asked } = world(on, { status: 'M  api/health.ts\nMM api/db.ts\n?? notes.txt\n' })
   await start($)
   const pending = $.command.run({ command: 'commit-msg' })
   await clock.advance(1000)
@@ -217,11 +226,11 @@ test('without a format file it drafts from history, notes it, and leaves the cha
 
   expect(prompts[0]!.prompt).not.toContain('<format_rules>')
   expect(prompts[0]!.prompt).toContain('<recent_messages>\n<message>\nfix(api): handle timeouts\n</message>\n</recent_messages>')
-  expect(logs[0]).toContain('no format file found (.claude/commit-format.md, .github/commit-format.md)')
-  expect(logs[0]).toContain('Not staged (left out of the message):\n  MM api/db.ts\n  ?? notes.txt')
-  expect(logs[0]).not.toContain('api/health.ts\n')
+  expect(r.text).toContain('no format file found (.claude/commit-format.md, .github/commit-format.md)')
+  expect(r.text).toContain('Not staged (left out of the message):\n  MM api/db.ts\n  ?? notes.txt')
+  expect(r.text).not.toContain('api/health.ts\n')
   expect(asked).toEqual([QUESTION])
-  expect(r.text).toBe('commit-msg: left staged, nothing committed.')
+  expect(r.text).toMatch(/\n\ncommit-msg: left staged, nothing committed\.$/)
   expect(commits(runs).length).toBe(0)
 })
 
@@ -233,7 +242,7 @@ test('a dismissed Commit dialog commits nothing', async ($, on) => {
   await clock.advance(1000)
   const r = await pending
   expect(asked).toEqual([QUESTION])
-  expect(r.text).toBe('commit-msg: left staged, nothing committed.')
+  expect(r.text).toMatch(/\n\ncommit-msg: left staged, nothing committed\.$/)
   expect(commits(runs).length).toBe(0)
 })
 
@@ -282,7 +291,7 @@ test('when every recent commit is tagged, they are kept', async ($, on) => {
 test('amend merges the draft into HEAD and warns when HEAD is pushed', async ($, on) => {
   const merged = '```\nfix(api): handle timeouts, add the health endpoint\n```'
   const clock = mock.clock(on, { now: 0 })
-  const { runs, prompts, order } = world(on, { pushed: true, choice: 'Amend (HEAD is pushed)', replies: [DRAFT, merged] })
+  const { runs, prompts, previews, order } = world(on, { pushed: true, choice: 'Amend (HEAD is pushed)', replies: [DRAFT, merged] })
   await start($)
   const pending = $.command.run({ command: 'commit-msg' })
   await clock.advance(1000)
@@ -293,6 +302,7 @@ test('amend merges the draft into HEAD and warns when HEAD is pushed', async ($,
   const [commit] = commits(runs)
   expect(commit!.argv).toEqual(['git', 'commit', '-F', '-', '--amend'])
   expect(commit!.stdin).toBe('fix(api): handle timeouts, add the health endpoint\n')
-  expect(order).toEqual(['log', 'ask', 'commit'])
-  expect(r.text).toBe("commit-msg: amended abc1234 (draft merged into HEAD's message), not pushed.")
+  expect(order).toEqual(['ask', 'commit'])
+  expect(previews[0]!['Amend (HEAD is pushed)']).toBe('feat(api): add the health endpoint')
+  expect(r.text).toMatch(/\n\ncommit-msg: amended abc1234 \(draft merged into HEAD's message\), not pushed\.$/)
 })
